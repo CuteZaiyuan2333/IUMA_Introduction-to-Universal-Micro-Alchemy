@@ -1,3 +1,4 @@
 target/
 iuma/target/
 **/*.rs.bk
+design.txt
