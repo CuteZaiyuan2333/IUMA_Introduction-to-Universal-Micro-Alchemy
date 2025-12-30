@@ -1,0 +1,12 @@
+# Rust
+iuma/target/
+target/
+**/*.rs.bk
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
