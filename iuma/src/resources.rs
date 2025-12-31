@@ -5,8 +5,6 @@ use std::collections::HashMap;
 pub struct GlobalConstants {
     pub light_speed: f32,
     pub time_scale: f32,
-    pub bloom_enabled: bool,
-    pub bloom_intensity: f32,
 }
 
 impl Default for GlobalConstants {
@@ -14,8 +12,6 @@ impl Default for GlobalConstants {
         Self {
             light_speed: 1000.0,
             time_scale: 1.0,
-            bloom_enabled: true,
-            bloom_intensity: 0.3,
         }
     }
 }
@@ -97,6 +93,10 @@ pub struct ParticleTypeDefinition {
     pub default_color: Color,
     pub emits_field: Option<usize>, 
     pub emission_shape: FieldShape,
+    // The visual representation of the curve (1D Gradient Texture)
+    // We store it here so we can update it when the curve changes.
+    // It's optional because it's created lazily or during setup.
+    pub field_texture: Option<Handle<Image>>, 
 }
 
 /// The central Alchemy definition
@@ -122,6 +122,7 @@ impl Default for AlchemyRules {
             default_color: Color::RED,
             emits_field: Some(0),
             emission_shape: FieldShape::new_linear_falloff(300.0, 1000.0),
+            field_texture: None,
         });
 
         // Define Type 1: Electron-like
@@ -131,6 +132,7 @@ impl Default for AlchemyRules {
             default_color: Color::BLUE,
             emits_field: Some(1),
             emission_shape: FieldShape::new_linear_falloff(300.0, 1000.0),
+            field_texture: None,
         });
 
         // Default Interactions

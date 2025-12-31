@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use bevy::sprite::{MaterialMesh2dBundle, Mesh2dHandle};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_asset::RenderAssetUsages;
 use crate::resources::*;
 use crate::components::*;
 use crate::render::FieldMaterial;
@@ -10,10 +12,27 @@ pub fn ui_system(
     mut global_consts: ResMut<GlobalConstants>,
     mut alchemy: ResMut<AlchemyRules>,
     mut commands: Commands,
-    particle_query: Query<&Particle>,
+    particle_query: Query<Entity, With<Particle>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FieldMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
+    // Ensure textures are initialized
+    for p_def in alchemy.particle_types.iter_mut() {
+        if p_def.field_texture.is_none() {
+            let size = Extent3d { width: 128, height: 1, depth_or_array_layers: 1 };
+            let mut image = Image::new_fill(
+                size,
+                TextureDimension::D2,
+                &[255, 255, 255, 255],
+                TextureFormat::Rgba8Unorm,
+                RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD
+            );
+            update_texture_from_shape(&mut image, &p_def.emission_shape);
+            p_def.field_texture = Some(images.add(image));
+        }
+    }
+
     // 1. Control Panel
     egui::Window::new("Universal Control").show(contexts.ctx_mut(), |ui| {
         ui.heading("Universe Constants");
@@ -26,13 +45,6 @@ pub fn ui_system(
         ui.horizontal(|ui| {
             ui.label("Time Scale:");
             ui.add(egui::Slider::new(&mut global_consts.time_scale, 0.0..=5.0));
-        });
-        
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut global_consts.bloom_enabled, "Enable Bloom");
-            if global_consts.bloom_enabled {
-                ui.add(egui::Slider::new(&mut global_consts.bloom_intensity, 0.0..=1.0).text("Intensity"));
-            }
         });
 
         ui.separator();
@@ -55,16 +67,16 @@ pub fn ui_system(
         
         ui.separator();
         if ui.button("Clear All Particles").clicked() {
-             // To be implemented
+             for entity in particle_query.iter() {
+                 commands.entity(entity).despawn_recursive();
+             }
         }
     });
 
-    // 2. Alchemy Editor
+    // 2. Alchemy Editor (Matrix)
     egui::Window::new("Alchemy Matrix").show(contexts.ctx_mut(), |ui| {
         ui.label("Interaction Weights (Force Multiplier)");
-        
         let num_types = alchemy.particle_types.len();
-
         egui::Grid::new("interaction_matrix").striped(true).show(ui, |ui| {
             ui.label(""); 
             for i in 0..num_types {
@@ -76,7 +88,6 @@ pub fn ui_system(
 
             for subject_idx in 0..num_types {
                 ui.label(format!("Subject\n{}", alchemy.particle_types[subject_idx].name));
-                
                 for field_source_idx in 0..num_types {
                     if let Some(field_id) = alchemy.particle_types[field_source_idx].emits_field {
                         let weight = alchemy.interactions.entry((subject_idx, field_id)).or_insert(0.0);
@@ -90,7 +101,7 @@ pub fn ui_system(
         });
     });
 
-    // 3. Field Curve Editor
+    // 3. Field Shape Editor
     egui::Window::new("Field Shape Editor").show(contexts.ctx_mut(), |ui| {
         for p_def in alchemy.particle_types.iter_mut() {
             ui.collapsing(format!("{} Field Shape", p_def.name), |ui| {
@@ -113,7 +124,6 @@ pub fn ui_system(
                 ui.separator();
                 ui.label("Curve Points (Distance 0.0 -> 1.0)");
                 
-                // Point Editor
                 let mut points_to_remove = Vec::new();
                 for (i, point) in shape.points.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
@@ -127,7 +137,6 @@ pub fn ui_system(
                     });
                 }
                 
-                // Remove deleted points (reverse order to keep indices valid)
                 for i in points_to_remove.iter().rev() {
                     shape.points.remove(*i);
                 }
@@ -137,43 +146,36 @@ pub fn ui_system(
                     changed = true;
                 }
 
-                // If anything changed, re-bake the LUT
+                // Logic Update
                 if changed {
                     shape.bake_lut();
+                    // Texture Update!
+                    if let Some(handle) = &p_def.field_texture {
+                        if let Some(image) = images.get_mut(handle) {
+                            update_texture_from_shape(image, shape);
+                        }
+                    }
                 }
                 
-                // --- PLOT PREVIEW ---
-                // Try to use egui_plot if available. 
-                // Since I cannot verify if 'bevy_egui' exports 'egui_plot' without checking Cargo features,
-                // I will use a simple custom painter for now to avoid compilation errors.
-                // It's safer and sufficient for MVP.
-                
+                // Plot Preview
                 let (response, painter) = ui.allocate_painter(bevy_egui::egui::Vec2::new(300.0, 100.0), egui::Sense::hover());
                 let rect = response.rect;
                 
-                // Background
                 painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
-                
-                // Draw Zero Line
                 let zero_y = rect.center().y;
                 painter.line_segment(
                     [egui::Pos2::new(rect.left(), zero_y), egui::Pos2::new(rect.right(), zero_y)],
                     egui::Stroke::new(1.0, egui::Color32::GRAY),
                 );
 
-                // Draw Curve from LUT
                 if shape.lut.len() > 1 {
                     let points: Vec<egui::Pos2> = shape.lut.iter().enumerate().map(|(i, &val)| {
                         let t = i as f32 / (shape.lut.len() - 1) as f32;
                         let x = rect.left() + t * rect.width();
-                        // Map -1.0..1.0 to rect height. 0 is center.
-                        // val=1.0 -> top, val=-1.0 -> bottom
-                        // Actually, let's map 1.0 to top (min y), -1.0 to bottom (max y)
-                        let normalized_y = -val; // invert because screen Y is down
+                        let normalized_y = -val; 
                         let y = rect.center().y + normalized_y * (rect.height() / 2.0);
                         egui::Pos2::new(x, y)
                     }).collect();
-
                     painter.add(egui::Shape::line(points, egui::Stroke::new(2.0, egui::Color32::YELLOW)));
                 }
             });
@@ -181,9 +183,32 @@ pub fn ui_system(
     });
 }
 
+fn update_texture_from_shape(image: &mut Image, shape: &FieldShape) {
+    let width = image.texture_descriptor.size.width as usize;
+    let data = &mut image.data;
+    
+    for i in 0..width {
+        let t = i as f32 / (width - 1) as f32;
+        let lut_idx = ((t * (shape.lut.len() - 1) as f32) as usize).clamp(0, shape.lut.len() - 1);
+        let val = shape.lut[lut_idx];
+        
+        let pixel_val = (val.abs() * 255.0).clamp(0.0, 255.0) as u8;
+        
+        let idx = i * 4;
+        if idx + 3 < data.len() {
+            data[idx] = pixel_val;     // R
+            data[idx+1] = pixel_val;   // G
+            data[idx+2] = pixel_val;   // B
+            data[idx+3] = 255;         // A
+        }
+    }
+}
+
+/// Syncs the visuals (Mesh Scale & Intensity) with the AlchemyRules
 pub fn sync_field_visualization(
     alchemy: Res<AlchemyRules>,
     particle_query: Query<(Entity, &ParticleTypeID, &Children), With<Particle>>,
+    mut transform_query: Query<&mut Transform>,
     mut material_handles: Query<&mut Handle<FieldMaterial>>,
     mut materials: ResMut<Assets<FieldMaterial>>,
 ) {
@@ -191,15 +216,24 @@ pub fn sync_field_visualization(
         let def = &alchemy.particle_types[type_id.0];
         
         for child in children.iter() {
+            // 1. Update Intensity 
             if let Ok(mat_handle) = material_handles.get_mut(*child) {
                 if let Some(material) = materials.get_mut(mat_handle.id()) {
-                     // Approximate visual intensity from the first point of the curve (usually x=0)
-                     let start_val = def.emission_shape.points.first().map(|p| p.y).unwrap_or(1.0);
-                     let target_intensity = (def.emission_shape.strength_scale * start_val.abs() / 2000.0).clamp(0.2, 1.0);
-                     
+                     // Intensity is now purely a multiplier.
+                     let target_intensity = (def.emission_shape.strength_scale / 1000.0).clamp(0.2, 2.0);
                      if (material.intensity - target_intensity).abs() > 0.01 {
                          material.intensity = target_intensity;
                      }
+                }
+            }
+
+            // 2. Update Scale
+            if material_handles.get(*child).is_ok() {
+                if let Ok(mut transform) = transform_query.get_mut(*child) {
+                    let target_scale = def.emission_shape.max_radius;
+                    if (transform.scale.x - target_scale).abs() > 0.1 {
+                        transform.scale = Vec3::new(target_scale, target_scale, 1.0);
+                    }
                 }
             }
         }
@@ -238,19 +272,22 @@ fn spawn_particle(
     ))
     .with_children(|parent| {
         if def.emits_field.is_some() {
-            let radius = def.emission_shape.max_radius;
-            let mesh_handle = meshes.add(Mesh::from(Circle::new(radius))); 
-            
-            let start_val = def.emission_shape.points.first().map(|p| p.y).unwrap_or(1.0);
-            let intensity = (def.emission_shape.strength_scale * start_val.abs() / 2000.0).clamp(0.2, 1.0);
+            let mesh_handle = meshes.add(Mesh::from(Circle::new(1.0))); 
+            let texture_handle = def.field_texture.clone().unwrap_or_default(); 
+            let intensity = (def.emission_shape.strength_scale / 1000.0).clamp(0.2, 2.0);
 
             parent.spawn(MaterialMesh2dBundle {
                 mesh: Mesh2dHandle(mesh_handle),
                 material: materials.add(FieldMaterial {
                     color: def.default_color,
                     intensity,
+                    lut_texture: texture_handle,
                 }),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.0, -0.1)), 
+                transform: Transform {
+                    translation: Vec3::new(0.0, 0.0, -0.1),
+                    scale: Vec3::new(def.emission_shape.max_radius, def.emission_shape.max_radius, 1.0),
+                    ..default()
+                },
                 ..default()
             });
         }

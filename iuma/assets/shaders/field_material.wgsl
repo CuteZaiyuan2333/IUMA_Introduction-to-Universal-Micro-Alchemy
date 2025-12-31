@@ -6,29 +6,32 @@ struct FieldMaterial {
 };
 
 @group(2) @binding(0) var<uniform> material: FieldMaterial;
+@group(2) @binding(1) var lut_texture: texture_2d<f32>; // Actually 1D data, but stored in 2D for compatibility
+@group(2) @binding(2) var lut_sampler: sampler;
 
 @fragment
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
-    // UV coordinates are 0.0 to 1.0. Center is 0.5, 0.5.
-    let uv = mesh.uv;
     let center = vec2<f32>(0.5, 0.5);
+    let dist = distance(mesh.uv, center);
     
-    // Calculate distance from center
-    let dist = distance(uv, center);
-    
-    // Circular cutout (radius 0.5)
+    // Circular cutout (radius 0.5 in UV space)
     if (dist > 0.5) {
         discard;
     }
 
-    // Radial Falloff (1.0 at center, 0.0 at edge)
-    // We can tweak this power to make the field "softer" or "sharper"
-    // Using 1.0 / dist mimics gravity/electric field falloff nicely but needs clamping
-    // Let's use a soft smoothstep for better visual aesthetics
-    let falloff = 1.0 - smoothstep(0.0, 0.5, dist);
+    // Map distance (0.0 -> 0.5) to UV (0.0 -> 1.0)
+    // dist * 2.0 covers the full radius
+    let sample_u = dist * 2.0; 
     
-    // Apply intensity
-    let alpha = falloff * material.intensity;
+    // Sample the LUT
+    // We sample at (u, 0.5). Texture is Nx1 pixels.
+    let curve_val = textureSample(lut_texture, lut_sampler, vec2<f32>(sample_u, 0.5)).r;
+
+    // Apply intensity. 
+    // Note: curve_val can be negative (repulsion), but for visuals we take abs() 
+    // or maybe we only visualize attraction? Usually fields are energy, so abs() makes sense.
+    // Let's use abs() so "strong repulsion" looks as bright as "strong attraction".
+    let alpha = abs(curve_val) * material.intensity;
 
     return vec4<f32>(material.color.rgb, alpha);
 }
